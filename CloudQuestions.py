@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 import mysql.connector
 from logging.handlers import RotatingFileHandler
 import json
+import pymorphy2
 
 # CloudQuestionsBot
 TOKEN = ''
@@ -27,7 +28,7 @@ DB_PORT = "9999"
 DB_DATABASE = "bots"
 
 # DB_USER = "bot_user"
-# DB_PASSWORD = ""
+# DB_PASSWORD = "bot_user==="
 # DB_HOST = "127.0.0.1"
 # # DB_HOST = "192.168.1.5"
 # DB_PORT = "3306"
@@ -42,6 +43,14 @@ CRAWLER_TIMEOUT = 30
 
 headers = {'User-Agent': '''Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.94 Safari/537.36 OPR/49.0.2725.64'''}
 
+class User:
+    def __init__(self, id):
+        self.id = id
+        self.tmp_question_tag_list = []
+        self.tmp_question_id = None
+        self.tmp_question_text = None
+
+tmp_user_dict = {}
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -81,7 +90,7 @@ def handle_start(message):
         bot.send_message(message.chat.id, "FUBAR. We worked on it...")
     return
 
-@bot.message_handler(commands=['set'])
+@bot.message_handler(commands=['set']) # not used, manual set tag-list
 def handle_set(message):
     try:
         logger.info("Receive Set command from chat ID:" + str(message.chat.id))
@@ -144,12 +153,14 @@ def show_help(message):
     try:
         logger.info("Receive Help command from chat ID:" + str(message.chat.id))
         bot.send_message(message.chat.id, "Usage:\n"
+                          "tap question - answer the question\n"
                           "/help - show this message\n"
-                          "/qq - answer the question\n"
                           "/show - show your questions and answers\n"
-                          "/get - get incomming questions\n"                
+                          "/addurl - add url to your profile\n"
+                          "/edit - edit your profile\n"
+                          "/qq - get incomming questions\n"  
                           "/... - ...\n"
-                          "/clear - delete all questions\n"
+                          "/clear - clear tag-list\n"
                           "\n"
                           "\n", parse_mode='Markdown')
     except Exception as e:
@@ -249,25 +260,110 @@ def bot_show_updated_tags(message_):
 @bot.message_handler(func=lambda m: True)
 def handle_other_message(message):
     content_ = message.text.strip()
-    print(content_)
+    print(message)
     if content_.find("?") != -1:
         # it is question!
-        print("fine question!")
-        bot.reply_to(message, "Question Tags: <random tags>\n Is it correct? OK")
-        bot.register_next_step_handler(message, question_processing)
+        # TODO check Question in history for existing one
+        if save_question(message):
+            user = User(message.chat.id)
+            user.tmp_question_text = message.text
+            user.tmp_question_tag_list = get_question_tags(message.text)
+            user.tmp_question_id = str(message.chat.id) + "_" + str(message.message_id)
+            tmp_user_dict[message.chat.id] = user
+            bot.reply_to(message, "Question Tags: + " + str(user.tmp_question_tag_list) + "Is it correct? OK")
+            bot.register_next_step_handler(message, question_processing)
+        else:
+            # TODO Create correct try-catch
+            print("FUBAR")
         return
     else:
         logger.info("Unknown command: " + str(message) + ". Show Help")
         show_help(message)
     return
 
+def save_question(message_):
+    try:
+        question_id = str(message_.chat.id) + "_" + str(message_.message_id)
+        for result_ in cursor_m.execute("insert into qbot_questions (user_id,question_id,question_text) values (%s,%s,%s)", (message_.chat.id, question_id, message_.text), multi=True):
+            pass
+    except mysql.connector.DatabaseError as err:
+        logger.warning("Cant add Question. Reconnect..." + str(err))
+        if mysql_reconnect():
+            return save_question(message_)
+        else:
+            logger.critical("Cant add Question. ")
+            bot.send_message(message_.chat.id, "FUBAR. We worked on it...")
+    except Exception as e:
+        logger.critical("Cant add Question. " + str(e))
+    else:
+        try:
+            connection_main.commit()
+            return True
+        except Exception as e:
+            logger.critical("Cant commit transaction Add Question. " + str(e))
+
+    return False
+
+def get_question_tags(text_):
+
+    pymorphy = pymorphy2.MorphAnalyzer()
+    word_list = []
+    for word in text_.replace("\n"," ").split():
+        word = pymorphy.parse(word)[0].normal_form
+        if len(word) > 2:
+            word = word.replace(",","").replace("!","").replace("?","").replace(".","")
+            word_list.append(word)
+
+    # word_list_tmp = text_.replace("\n"," ").replace(", "," ").replace(","," ").replace("?","")
+    # word_list_tmp = word_list_tmp.split(" ")
+    # word_list_tmp = list(filter(None, word_list_tmp))
+    # word_list = []
+    # for word in word_list_tmp:
+    #     if len(word) > 3:
+    #         word_list.append(word)
+    print(word_list)
+
+    return word_list
+
+def update_question_tag(message_, cursor_, connection_):
+
+    user = tmp_user_dict[message_.chat.id]
+    tag_list = "|".join(user.tmp_question_tag_list)
+
+    try:
+         for result_ in cursor_m.execute("UPDATE qbot_questions SET question_tags=%s WHERE question_id=%s", (tag_list,user.tmp_question_id),multi=True):
+            pass
+    except mysql.connector.DatabaseError as err:
+        logger.warning("Cant update Question tags. Reconnect..." + str(err))
+        if mysql_reconnect():
+            # TODO Check all recurses in DB requests
+            return update_question_tag(message_, cursor_, connection_)
+        else:
+            logger.critical("Cant update Question tags. ")
+            bot.send_message(message_.chat.id, "FUBAR. We worked on it...")
+    except Exception as e:
+        logger.critical("Cant update Question tags. " + str(e))
+    else:
+        try:
+            connection_main.commit()
+            return True
+        except Exception as e:
+            logger.critical("Cant commit transaction update Question tags. " + str(e))
+    return False
+
 def question_processing(message_):
 
-    #  TODO Question processing: get tags,
     #  TODO manual tag list correction (wished: in real time show users count with the same tags)
-    #  TODO commit to DB
-    #  TODO add to processing Queue()
-    bot.reply_to(message_, "Now sending you Q to people: ")
+
+    if update_question_tag(message_, cursor_m, connection_main):
+
+        user = tmp_user_dict[message_.chat.id]
+        bot.reply_to(message_, "Now sending you Q to people: ")
+        question_set = (message_.chat.id, user.tmp_question_id, user.tmp_question_tag_list, user.tmp_question_text)
+        queue.put(question_set)
+
+        tmp_user_dict.pop(message_.chat.id) # remove tmp key
+        print(tmp_user_dict)
 
     return
 
@@ -277,7 +373,7 @@ def worker(thread_id_,connection_,cursor_): # processing Queue(), matching, send
     while True:
         try:
             if not queue.empty():
-                item = queue.get() # item[0]:id, item[1]: tags, item[2]: text, item[3+]: additional filters(age,profi,geo)
+                item = queue.get() # item[0]:user_id, item[1]:question_id, item[2]: tags, item[3]: text, item[4+]: additional filters(age,profi,geo)
                 for user in get_users(cursor_):  # user[0]:id
                     if question_ok_for_user(item,user[0]):
                         send_item(user[0],item)
@@ -290,15 +386,22 @@ def worker(thread_id_,connection_,cursor_): # processing Queue(), matching, send
             return
 
 def question_ok_for_user(question_set_, user_id_):
-    # question_set (item[0]:id, item[1]: tags, item[2]: text, item[3+]: additional filters(age,profi,geo))
+    # item[0]:user_id, item[1]:question_id, item[2]: tags, item[3]: text, item[4+]: additional filters(age,profi,geo)
+    print(question_set_)
+    print(user_id_)
+
+    # TODO dont forget about self-matching
+    if int(user_id_) == int(question_set_[0]):
+        return False
 
     # TODO Matching function
 
-    return False
+    return True # TODO broadcast mode ON =)
 
 def send_item(channel_,item_):
-    # item[0]:id, item[1]: tags, item[2]: text, item[3+]: additional filters(age,profi,geo)
-    message_text = item_[2] + "\n" + item_[1] # send text and tags
+    # item[0]:user_id, item[1]:question_id, item[2]: tags, item[3]: text, item[4+]: additional filters(age,profi,geo)
+    tag_list = ", ".join(item_[2])
+    message_text = item_[3] + "\n\nTags: " + tag_list # send text and tags
     try:
         bot.send_message(channel_, message_text, disable_web_page_preview=True)
         logger.info("SEND MES:" + message_text.replace("\n", ", "))
@@ -615,6 +718,7 @@ if __name__ == '__main__':
     # ====== debug area
 
     # print(get_users(cursor_m))
+    # get_question_tags("test      5рора  па мы  авава ваа")
     # quit()
 
     # ================
